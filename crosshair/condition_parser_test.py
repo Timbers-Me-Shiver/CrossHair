@@ -9,7 +9,10 @@ except ImportError:  # pragma: no cover - only needed for Python < 3.9
     from typing_extensions import Annotated, Unpack
 
 import pytest
-pytest.importorskip("beartype", reason="beartype is required for crosshair-beartype tests")
+
+pytest.importorskip(
+    "beartype", reason="beartype is required for crosshair-beartype tests"
+)
 from beartype import beartype
 from beartype.vale import Is, IsInstance
 
