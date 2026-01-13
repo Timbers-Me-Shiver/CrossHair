@@ -9,6 +9,9 @@ except ImportError:  # pragma: no cover - only needed for Python < 3.9
     from typing_extensions import Annotated, Unpack
 
 import pytest
+pytest.importorskip("beartype", reason="beartype is required for crosshair-beartype tests")
+from beartype import beartype
+from beartype.vale import Is, IsInstance
 
 from crosshair.condition_parser import (
     AssertsParser,
@@ -691,6 +694,44 @@ def test_annotated_types_timezone_metadata():
     assert all(cond.evaluate({"x": utc_dt}) for cond in utc_conditions.pre)
     assert any(not cond.evaluate({"x": naive_dt}) for cond in utc_conditions.pre)
     assert any(not cond.evaluate({"x": offset_dt}) for cond in utc_conditions.pre)
+
+
+@pytest.mark.skipif(Is is None, reason="beartype.vale is not installed")
+def test_beartype_vale_metadata():
+    from beartype.vale import Is, IsInstance
+
+    def constrained(
+        x: Annotated[int, Is[lambda v: v > 0]],
+    ) -> Annotated[str, IsInstance[str]]:
+        return str(x)
+
+    composite = CompositeConditionParser()
+    composite.parsers.append(Pep316Parser(composite))
+    conditions = composite.get_fn_conditions(FunctionInfo.from_fn(constrained))
+    assert conditions is not None
+    assert len(conditions.pre) == 1
+    assert all(cond.evaluate({"x": 3}) for cond in conditions.pre)
+    assert any(not cond.evaluate({"x": 0}) for cond in conditions.pre)
+    assert len(conditions.post) == 1
+    assert conditions.post[0].evaluate({"__return__": "ok"}) is True
+    assert conditions.post[0].evaluate({"__return__": 1}) is False
+
+
+@pytest.mark.skipif(beartype is None or Is is None, reason="beartype is not installed")
+def test_beartype_decorator_preserves_annotations():
+    from beartype.vale import Is
+
+    @beartype
+    def guarded(x: Annotated[int, Is[lambda v: v >= 1]]) -> int:
+        return x
+
+    composite = CompositeConditionParser()
+    composite.parsers.append(Pep316Parser(composite))
+    conditions = composite.get_fn_conditions(FunctionInfo.from_fn(guarded))
+    assert conditions is not None
+    assert len(conditions.pre) == 1
+    assert all(cond.evaluate({"x": 5}) for cond in conditions.pre)
+    assert any(not cond.evaluate({"x": 0}) for cond in conditions.pre)
 
 
 def no_postconditions(items: List[float]) -> float:

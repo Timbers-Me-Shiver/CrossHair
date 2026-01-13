@@ -49,6 +49,15 @@ except ModuleNotFoundError:
     annotated_types = None  # type: ignore
 
 try:
+    from beartype.vale._core._valecore import BeartypeValidator
+except ImportError:
+    try:
+        from beartype.vale._valecore import BeartypeValidator  # type: ignore
+    except ImportError:
+        BeartypeValidator = None
+
+
+try:
     import typing_extensions as _typing_extensions  # type: ignore
 except ModuleNotFoundError:
     _typing_extensions = None  # type: ignore
@@ -502,6 +511,25 @@ def _callable_accepts_one_arg(obj: object) -> bool:
     return required_positional <= 1
 
 
+def _is_beartype_vale_validator(meta: object) -> bool:
+    if BeartypeValidator is None:
+        return False
+    try:
+        return isinstance(meta, BeartypeValidator)
+    except Exception:
+        return False
+
+
+def _make_beartype_vale_predicate(meta: object) -> Callable[[object], bool]:
+    def _pred(value: object) -> bool:
+        is_valid = getattr(meta, "is_valid", None)
+        if not callable(is_valid):
+            raise AttributeError(f"{meta!r} missing is_valid()")
+        return bool(is_valid(value))
+
+    return _pred
+
+
 def _metadata_to_value_predicate(
     meta: object,
 ) -> Optional[Tuple[Callable[[object], bool], str]]:
@@ -513,6 +541,10 @@ def _metadata_to_value_predicate(
             return bool(_m.is_valid(v))  # type: ignore[attr-defined]
 
         return (_pred_valid, f"Annotated[{meta!r}]")
+
+    if _is_beartype_vale_validator(meta):
+        pred = _make_beartype_vale_predicate(meta)
+        return (pred, f"Annotated[{meta!r}]")
 
     if (
         annotated_types is not None
