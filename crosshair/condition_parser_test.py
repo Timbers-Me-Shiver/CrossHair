@@ -442,6 +442,7 @@ def test_CompositeConditionParser():
 
 
 def test_annotated_callable_metadata_pre_post():
+    """Validate pre/post conditions from callable Annotated metadata."""
     import functools
     import operator
 
@@ -475,6 +476,7 @@ def test_annotated_callable_metadata_pre_post():
 
 
 def test_annotated_metadata_with_is_valid():
+    """Ensure is_valid metadata and Unpack entries become preconditions."""
     class Even:
         def is_valid(self, value: int) -> bool:
             return value % 2 == 0
@@ -508,6 +510,7 @@ def test_annotated_metadata_with_is_valid():
 
 
 def test_annotated_class_invariant():
+    """Confirm Annotated class attributes yield invariant conditions."""
     def gt_zero(value: int) -> bool:
         return value > 0
 
@@ -543,6 +546,7 @@ def test_annotated_class_invariant():
 
 @pytest.mark.skipif(annotated_types is None, reason="annotated-types is not installed")
 def test_annotated_types_interval_len_metadata():
+    """Check annotated_types interval/len metadata for pre/post constraints."""
     def constrained(
         x: Annotated[
             Annotated[int, annotated_types.Interval(gt=0, lt=10), object()],
@@ -581,6 +585,7 @@ def test_annotated_types_interval_len_metadata():
 
 @pytest.mark.skipif(annotated_types is None, reason="annotated-types is not installed")
 def test_annotated_types_predicate_metadata():
+    """Ensure annotated_types.Predicate callables contribute constraints."""
     import functools
     import operator
 
@@ -612,6 +617,7 @@ def test_annotated_types_predicate_metadata():
 
 @pytest.mark.skipif(annotated_types is None, reason="annotated-types is not installed")
 def test_annotated_types_grouped_metadata_unpack():
+    """Verify GroupedMetadata and Unpack expand into multiple conditions."""
     class Field(annotated_types.GroupedMetadata):
         def __init__(self, ge: Optional[int] = None, le: Optional[int] = None) -> None:
             self.ge = ge
@@ -647,6 +653,7 @@ def test_annotated_types_grouped_metadata_unpack():
 
 @pytest.mark.skipif(annotated_types is None, reason="annotated-types is not installed")
 def test_annotated_types_timezone_metadata():
+    """Validate annotated_types.Timezone metadata on datetimes."""
     import datetime
 
     def accepts_naive(
@@ -701,6 +708,7 @@ def test_annotated_types_timezone_metadata():
 
 @pytest.mark.skipif(Is is None, reason="beartype.vale is not installed")
 def test_beartype_vale_metadata():
+    """Confirm beartype.vale validators translate into conditions."""
     from beartype.vale import Is, IsInstance
 
     def constrained(
@@ -722,6 +730,7 @@ def test_beartype_vale_metadata():
 
 @pytest.mark.skipif(beartype is None or Is is None, reason="beartype is not installed")
 def test_beartype_decorator_preserves_annotations():
+    """Ensure @beartype preserves Annotated metadata for parsing."""
     from beartype.vale import Is
 
     @beartype
@@ -739,6 +748,7 @@ def test_beartype_decorator_preserves_annotations():
 
 @pytest.mark.skipif(annotated_types is None, reason="annotated-types is not installed")
 def test_annotated_nested_metadata_flattening():
+    """Ensure nested Annotated metadata is flattened into conditions."""
     def gt(value: int) -> bool:
         return value > 0
 
@@ -762,6 +772,7 @@ def test_annotated_nested_metadata_flattening():
 
 @pytest.mark.skipif(annotated_types is None, reason="annotated-types is not installed")
 def test_annotated_types_unpacked_tuple_bounds():
+    """Check Unpack tuple bounds are flattened into constraints."""
     def constrained(
         x: Annotated[
             int,
@@ -788,6 +799,7 @@ def test_annotated_types_unpacked_tuple_bounds():
 
 @pytest.mark.skipif(annotated_types is None, reason="annotated-types is not installed")
 def test_annotated_types_regex_and_length():
+    """Validate regex predicate and length bounds from metadata."""
     import re
 
     def constrained(
@@ -813,6 +825,7 @@ def test_annotated_types_regex_and_length():
 
 @pytest.mark.skipif(annotated_types is None, reason="annotated-types is not installed")
 def test_class_invariants_with_grouped_metadata():
+    """Ensure grouped metadata on class attributes yields invariants."""
     class Resource:
         quota: Annotated[int, annotated_types.Ge(5), annotated_types.Le(10)]
         tag: Annotated[str, annotated_types.Predicate(str.isalpha)]
@@ -834,6 +847,7 @@ def test_class_invariants_with_grouped_metadata():
 
 @pytest.mark.skipif(annotated_types is None, reason="annotated-types is not installed")
 def test_string_annotation_metrics():
+    """Confirm stringified Annotated metadata is evaluated and parsed."""
     def is_positive(v: int) -> bool:
         return v > 0
 
@@ -854,6 +868,7 @@ def test_string_annotation_metrics():
 
 
 def test_beartype_vale_isattr_validator():
+    """Validate IsAttr constraints in beartype.vale metadata."""
     from beartype.vale import Is, IsAttr, IsInstance
 
     class Container:
@@ -875,6 +890,7 @@ def test_beartype_vale_isattr_validator():
 
 
 def test_beartype_vale_conjunction_validator():
+    """Ensure vale conjunction validators act as a single predicate."""
     from beartype.vale import Is
 
     def is_positive(v: int) -> bool:
@@ -898,6 +914,7 @@ def test_beartype_vale_conjunction_validator():
 
 
 def test_beartype_vale_isinstance_and_return():
+    """Ensure IsInstance validators apply to args and returns."""
     from beartype.vale import IsInstance
 
     def constrained(
@@ -918,6 +935,7 @@ def test_beartype_vale_isinstance_and_return():
 
 
 def test_beartype_vale_issubclass_validator():
+    """Validate IsSubclass metadata on class annotations."""
     from beartype.vale import IsSubclass
 
     def constrained(x: Annotated[type, IsSubclass[dict]]) -> type:
@@ -933,6 +951,7 @@ def test_beartype_vale_issubclass_validator():
 
 
 def test_beartype_vale_with_annotated_types_combo():
+    """Ensure beartype.vale and annotated_types metadata combine."""
     from beartype.vale import Is
 
     def constrained(

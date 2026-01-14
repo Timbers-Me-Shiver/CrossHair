@@ -331,22 +331,33 @@ class ClassConditions:
 # ---------------------------------------------------------------------------
 # Annotated / annotated-types integration
 #
-# Goal:
-# - Interpret constraints in typing.Annotated[T, ...] as CrossHair conditions:
+# Purpose:
+# - Translate typing.Annotated[T, ...] metadata into CrossHair conditions:
 #   - parameter metadata -> preconditions
 #   - return metadata -> postconditions (via __return__)
 #   - class attribute metadata -> invariants on self.<attr>
-#
-# Design notes:
-# - Avoid typing.get_type_hints(): CrossHair may run under tracing where
-#   interacting with typing internals can raise.
-# - Support two broad metadata families:
-#   - annotated-types (e.g., Gt(0), MinLen(3)) (expanded via GroupedMetadata)
-#   - arbitrary 1-arg predicates (e.g., lambda x: x > 0)
+# - Support annotated-types, beartype.vale validators, and callables (including
+#   n-ary predicates by binding available names).
+# - Keep evaluation robust under tracing by avoiding typing.get_type_hints and
+#   evaluating string annotations lazily.
 # ---------------------------------------------------------------------------
 
 
 def _eval_annotation_if_str(annotation: object, globs: Mapping[str, object]) -> object:
+    """Evaluate string annotations against provided globals.
+
+    Parameters
+    ----------
+    annotation : object
+        Annotation to evaluate. Non-string values are returned unchanged.
+    globs : Mapping[str, object]
+        Globals used to resolve the string annotation.
+
+    Returns
+    -------
+    object
+        The evaluated annotation, or the original value on failure.
+    """
     if isinstance(annotation, str):
         try:
             return eval(annotation, dict(globs), dict(globs))  # noqa: S307
@@ -356,6 +367,18 @@ def _eval_annotation_if_str(annotation: object, globs: Mapping[str, object]) -> 
 
 
 def _get_origin(hint: object) -> object:
+    """Return the typing origin for a type hint.
+
+    Parameters
+    ----------
+    hint : object
+        Type hint to inspect.
+
+    Returns
+    -------
+    object
+        Origin type, or None when unavailable.
+    """
     try:
         origin = get_origin(hint)
     except Exception:
@@ -369,6 +392,18 @@ def _get_origin(hint: object) -> object:
 
 
 def _get_args(hint: object) -> Tuple[object, ...]:
+    """Return the typing arguments for a type hint.
+
+    Parameters
+    ----------
+    hint : object
+        Type hint to inspect.
+
+    Returns
+    -------
+    tuple[object, ...]
+        The type arguments, or an empty tuple when absent.
+    """
     try:
         args = get_args(hint)
     except Exception:
@@ -382,6 +417,18 @@ def _get_args(hint: object) -> Tuple[object, ...]:
 
 
 def _is_annotated_type(hint: object) -> bool:
+    """Check whether the hint is typing.Annotated.
+
+    Parameters
+    ----------
+    hint : object
+        Type hint to inspect.
+
+    Returns
+    -------
+    bool
+        True when the hint represents an Annotated type.
+    """
     origin = _get_origin(hint)
     if origin is None:
         return False
@@ -389,7 +436,18 @@ def _is_annotated_type(hint: object) -> bool:
 
 
 def _unwrap_annotated_type(hint: object) -> Tuple[object, Tuple[object, ...]]:
-    """Return (base, metadata) with PEP 593 flattening (innermost first)."""
+    """Extract base type and flattened metadata from Annotated.
+
+    Parameters
+    ----------
+    hint : object
+        Annotated type hint to unwrap.
+
+    Returns
+    -------
+    tuple[object, tuple[object, ...]]
+        The base type and metadata tuple, with innermost metadata first.
+    """
     metadata: List[object] = []
     cur: object = hint
     while _is_annotated_type(cur):
@@ -403,6 +461,18 @@ def _unwrap_annotated_type(hint: object) -> Tuple[object, Tuple[object, ...]]:
 
 
 def _is_unpacked_metadata_item(item: object) -> bool:
+    """Determine whether a metadata item represents an Unpack wrapper.
+
+    Parameters
+    ----------
+    item : object
+        Metadata entry to inspect.
+
+    Returns
+    -------
+    bool
+        True if the item should be expanded via Unpack semantics.
+    """
     origin = _get_origin(item)
     if origin is None:
         origin = getattr(item, "__origin__", None)
@@ -428,6 +498,18 @@ def _is_unpacked_metadata_item(item: object) -> bool:
 
 
 def _is_grouped_metadata(item: object) -> bool:
+    """Check whether a metadata item is annotated_types.GroupedMetadata.
+
+    Parameters
+    ----------
+    item : object
+        Metadata entry to inspect.
+
+    Returns
+    -------
+    bool
+        True when the item is a GroupedMetadata instance.
+    """
     if annotated_types is None:
         return False
     grouped_meta = getattr(annotated_types, "GroupedMetadata", None)
@@ -440,6 +522,18 @@ def _is_grouped_metadata(item: object) -> bool:
 
 
 def _expand_unpack_targets(items: Tuple[object, ...]) -> List[object]:
+    """Expand Unpack targets into concrete metadata items.
+
+    Parameters
+    ----------
+    items : tuple[object, ...]
+        Items inside an Unpack wrapper.
+
+    Returns
+    -------
+    list[object]
+        Expanded metadata items.
+    """
     expanded: List[object] = []
     for item in items:
         if _is_grouped_metadata(item):
@@ -460,6 +554,18 @@ def _expand_unpack_targets(items: Tuple[object, ...]) -> List[object]:
 
 
 def _flatten_annotated_metadata(items: Tuple[object, ...]) -> Tuple[object, ...]:
+    """Flatten Annotated metadata while expanding Unpack and groupings.
+
+    Parameters
+    ----------
+    items : tuple[object, ...]
+        Raw metadata items from Annotated.
+
+    Returns
+    -------
+    tuple[object, ...]
+        Flattened sequence of metadata items.
+    """
     flat: List[object] = []
     queue: List[object] = list(items)
     while queue:
@@ -491,6 +597,18 @@ def _flatten_annotated_metadata(items: Tuple[object, ...]) -> Tuple[object, ...]
 
 
 def _callable_accepts_one_arg(obj: object) -> bool:
+    """Return True if a callable can accept a single positional argument.
+
+    Parameters
+    ----------
+    obj : object
+        Callable to inspect.
+
+    Returns
+    -------
+    bool
+        True when the callable can be invoked with one positional argument.
+    """
     if not callable(obj):
         return False
     try:
@@ -517,6 +635,24 @@ def _call_predicate_with_bindings(
     value: object,
     primary_name: str,
 ) -> bool:
+    """Invoke a predicate using bindings and the primary value.
+
+    Parameters
+    ----------
+    fn : Callable[..., object]
+        Predicate callable to invoke.
+    bindings : Mapping[str, object]
+        Available name bindings (e.g., function arguments).
+    value : object
+        Primary value under test for the Annotated metadata.
+    primary_name : str
+        Name to associate with the primary value when binding arguments.
+
+    Returns
+    -------
+    bool
+        Boolean result of invoking the predicate.
+    """
     local_bindings = dict(bindings)
     local_bindings.setdefault(primary_name, value)
     try:
@@ -560,6 +696,18 @@ def _call_predicate_with_bindings(
 
 
 def _is_beartype_vale_validator(meta: object) -> bool:
+    """Check whether metadata is a beartype.vale validator instance.
+
+    Parameters
+    ----------
+    meta : object
+        Metadata item to inspect.
+
+    Returns
+    -------
+    bool
+        True when the item is a BeartypeValidator instance.
+    """
     if BeartypeValidator is None:
         return False
     try:
@@ -572,6 +720,20 @@ def _make_beartype_vale_predicate(
     meta: object,
     primary_name: str,
 ) -> Callable[[Mapping[str, object], object], bool]:
+    """Create a predicate wrapper for a beartype.vale validator.
+
+    Parameters
+    ----------
+    meta : object
+        Beartype validator object.
+    primary_name : str
+        Name to bind the primary value under test.
+
+    Returns
+    -------
+    Callable[[Mapping[str, object], object], bool]
+        Predicate that evaluates the validator using bindings.
+    """
     def _pred(bindings: Mapping[str, object], value: object) -> bool:
         is_valid = getattr(meta, "is_valid", None)
         if not callable(is_valid):
@@ -585,7 +747,20 @@ def _metadata_to_value_predicate(
     meta: object,
     primary_name: str,
 ) -> Optional[Tuple[Callable[[Mapping[str, object], object], bool], str]]:
-    """Convert a single metadata item to a (predicate, expr_source) pair."""
+    """Convert a metadata item to a predicate and expression source.
+
+    Parameters
+    ----------
+    meta : object
+        Metadata entry from Annotated.
+    primary_name : str
+        Name to bind the primary value under test.
+
+    Returns
+    -------
+    tuple[Callable[[Mapping[str, object], object], bool], str] or None
+        Predicate and expression source, or None if unsupported.
+    """
     is_valid = getattr(meta, "is_valid", None)
     if callable(is_valid):
 
@@ -713,6 +888,20 @@ def _annotated_conditions_for_callable(
     fn: Callable[..., object],
     sig: inspect.Signature,
 ) -> Tuple[List[ConditionExpr], List[ConditionExpr], List[ConditionSyntaxMessage]]:
+    """Build pre/post conditions from Annotated metadata on a callable.
+
+    Parameters
+    ----------
+    fn : Callable[..., object]
+        Callable being analyzed.
+    sig : inspect.Signature
+        Signature to inspect for Annotated metadata.
+
+    Returns
+    -------
+    tuple[list[ConditionExpr], list[ConditionExpr], list[ConditionSyntaxMessage]]
+        Preconditions, postconditions, and syntax messages.
+    """
     globs = fn_globals(fn)
     filename, first_line, _ = sourcelines(fn)
 
@@ -777,6 +966,18 @@ def _annotated_conditions_for_callable(
 
 
 def _annotated_invariants_for_class(cls: type) -> List[ConditionExpr]:
+    """Build invariants from Annotated class attribute metadata.
+
+    Parameters
+    ----------
+    cls : type
+        Class to inspect.
+
+    Returns
+    -------
+    list[ConditionExpr]
+        Invariants derived from Annotated attributes.
+    """
     if not isinstance(cls, type):
         return []
     annotations = getattr(cls, "__annotations__", None)
@@ -821,6 +1022,20 @@ def _annotated_invariants_for_class(cls: type) -> List[ConditionExpr]:
 
 
 def _merge_conditions(base: "Conditions", extra: "Conditions") -> "Conditions":
+    """Merge two Conditions objects by concatenating rule lists.
+
+    Parameters
+    ----------
+    base : Conditions
+        Base conditions to preserve.
+    extra : Conditions
+        Additional conditions to append.
+
+    Returns
+    -------
+    Conditions
+        Merged conditions with combined pre/post and messages.
+    """
     return Conditions(
         base.fn,
         base.src_fn,
@@ -1099,6 +1314,8 @@ class CompositeConditionParser(ConditionParser):
                 ret = conditions
                 if conditions.has_any():
                     break
+        # If Annotated metadata exists on a pure-Python callable, synthesize
+        # pre/post conditions from it and merge with any parser-provided ones.
         extra: Optional[Conditions] = None
         fn_and_sig = fn.get_callable()
         if fn_and_sig is not None:
