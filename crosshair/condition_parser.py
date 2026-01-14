@@ -511,6 +511,54 @@ def _callable_accepts_one_arg(obj: object) -> bool:
     return required_positional <= 1
 
 
+def _call_predicate_with_bindings(
+    fn: Callable[..., object],
+    bindings: Mapping[str, object],
+    value: object,
+    primary_name: str,
+) -> bool:
+    local_bindings = dict(bindings)
+    local_bindings.setdefault(primary_name, value)
+    try:
+        sig = inspect.signature(fn)
+    except Exception:
+        return bool(fn(value))
+    args: List[object] = []
+    kwargs: Dict[str, object] = {}
+    used_names: Set[str] = set()
+    used_primary = False
+    for param in sig.parameters.values():
+        if param.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            if not used_primary:
+                args.append(value)
+                used_primary = True
+            elif param.name in local_bindings:
+                args.append(local_bindings[param.name])
+            elif param.default is not inspect._empty:
+                args.append(param.default)
+            else:
+                args.append(value)
+            used_names.add(param.name)
+        elif param.kind is inspect.Parameter.VAR_POSITIONAL:
+            if not args:
+                args.append(value)
+        elif param.kind is inspect.Parameter.KEYWORD_ONLY:
+            if param.name in local_bindings:
+                kwargs[param.name] = local_bindings[param.name]
+            elif param.default is inspect._empty:
+                kwargs[param.name] = value
+            used_names.add(param.name)
+        elif param.kind is inspect.Parameter.VAR_KEYWORD:
+            for key, val in local_bindings.items():
+                if key in used_names:
+                    continue
+                kwargs.setdefault(key, val)
+    return bool(fn(*args, **kwargs))
+
+
 def _is_beartype_vale_validator(meta: object) -> bool:
     if BeartypeValidator is None:
         return False
@@ -520,30 +568,39 @@ def _is_beartype_vale_validator(meta: object) -> bool:
         return False
 
 
-def _make_beartype_vale_predicate(meta: object) -> Callable[[object], bool]:
-    def _pred(value: object) -> bool:
+def _make_beartype_vale_predicate(
+    meta: object,
+    primary_name: str,
+) -> Callable[[Mapping[str, object], object], bool]:
+    def _pred(bindings: Mapping[str, object], value: object) -> bool:
         is_valid = getattr(meta, "is_valid", None)
         if not callable(is_valid):
             raise AttributeError(f"{meta!r} missing is_valid()")
-        return bool(is_valid(value))
+        return _call_predicate_with_bindings(is_valid, bindings, value, primary_name)
 
     return _pred
 
 
 def _metadata_to_value_predicate(
     meta: object,
-) -> Optional[Tuple[Callable[[object], bool], str]]:
+    primary_name: str,
+) -> Optional[Tuple[Callable[[Mapping[str, object], object], bool], str]]:
     """Convert a single metadata item to a (predicate, expr_source) pair."""
     is_valid = getattr(meta, "is_valid", None)
     if callable(is_valid):
 
-        def _pred_valid(v: object, _m=meta) -> bool:
-            return bool(_m.is_valid(v))  # type: ignore[attr-defined]
+        def _pred_valid(
+            bindings: Mapping[str, object],
+            value: object,
+            _fn=is_valid,
+            _name=primary_name,
+        ) -> bool:
+            return _call_predicate_with_bindings(_fn, bindings, value, _name)
 
         return (_pred_valid, f"Annotated[{meta!r}]")
 
     if _is_beartype_vale_validator(meta):
-        pred = _make_beartype_vale_predicate(meta)
+        pred = _make_beartype_vale_predicate(meta, primary_name)
         return (pred, f"Annotated[{meta!r}]")
 
     if (
@@ -554,32 +611,55 @@ def _metadata_to_value_predicate(
 
         if name == "Gt":
             bound = getattr(meta, "gt")
-            return (lambda v, b=bound: v > b, f"Annotated[{name}({bound!r})]")
+            return (
+                lambda _bindings, v, b=bound: v > b,
+                f"Annotated[{name}({bound!r})]",
+            )
         if name == "Ge":
             bound = getattr(meta, "ge")
-            return (lambda v, b=bound: v >= b, f"Annotated[{name}({bound!r})]")
+            return (
+                lambda _bindings, v, b=bound: v >= b,
+                f"Annotated[{name}({bound!r})]",
+            )
         if name == "Lt":
             bound = getattr(meta, "lt")
-            return (lambda v, b=bound: v < b, f"Annotated[{name}({bound!r})]")
+            return (
+                lambda _bindings, v, b=bound: v < b,
+                f"Annotated[{name}({bound!r})]",
+            )
         if name == "Le":
             bound = getattr(meta, "le")
-            return (lambda v, b=bound: v <= b, f"Annotated[{name}({bound!r})]")
+            return (
+                lambda _bindings, v, b=bound: v <= b,
+                f"Annotated[{name}({bound!r})]",
+            )
         if name == "MultipleOf":
             multiple = getattr(meta, "multiple_of")
             return (
-                lambda v, m=multiple: (v % m) == 0,
+                lambda _bindings, v, m=multiple: (v % m) == 0,
                 f"Annotated[{name}({multiple!r})]",
             )
         if name == "MinLen":
             n = getattr(meta, "min_length")
-            return (lambda v, n=n: len(v) >= n, f"Annotated[{name}({n!r})]")
+            return (
+                lambda _bindings, v, n=n: len(v) >= n,
+                f"Annotated[{name}({n!r})]",
+            )
         if name == "MaxLen":
             n = getattr(meta, "max_length")
-            return (lambda v, n=n: len(v) <= n, f"Annotated[{name}({n!r})]")
+            return (
+                lambda _bindings, v, n=n: len(v) <= n,
+                f"Annotated[{name}({n!r})]",
+            )
         if name == "Predicate":
             fn = getattr(meta, "func", None)
-            if callable(fn) and _callable_accepts_one_arg(fn):
-                return (lambda v, f=fn: bool(f(v)), f"Annotated[{name}({fn!r})]")
+            if callable(fn):
+                return (
+                    lambda bindings, v, f=fn, n=primary_name: _call_predicate_with_bindings(
+                        f, bindings, v, n
+                    ),
+                    f"Annotated[{name}({fn!r})]",
+                )
             return None
 
         if name == "Timezone":
@@ -602,7 +682,10 @@ def _metadata_to_value_predicate(
                     return str(tzinfo) == _tz
                 return False
 
-            return (_pred_timezone, f"Annotated[{name}({tz!r})]")
+            return (
+                lambda _bindings, v, _pred=_pred_timezone: _pred(v),
+                f"Annotated[{name}({tz!r})]",
+            )
 
         return None
 
@@ -611,14 +694,15 @@ def _metadata_to_value_predicate(
     ) in ("typing", "typing_extensions"):
         return None
 
-    if (
-        callable(meta)
-        and _callable_accepts_one_arg(meta)
-        and not isinstance(meta, type)
-    ):
+    if callable(meta) and not isinstance(meta, type):
 
-        def _pred_callable(v: object, _m=meta) -> bool:
-            return bool(_m(v))  # type: ignore[misc]
+        def _pred_callable(
+            bindings: Mapping[str, object],
+            value: object,
+            _m=meta,
+            _name=primary_name,
+        ) -> bool:
+            return _call_predicate_with_bindings(_m, bindings, value, _name)
 
         return (_pred_callable, f"Annotated[{meta!r}]")
 
@@ -645,7 +729,7 @@ def _annotated_conditions_for_callable(
         if not meta:
             continue
         for item in _flatten_annotated_metadata(meta):
-            converted = _metadata_to_value_predicate(item)
+            converted = _metadata_to_value_predicate(item, param_name)
             if converted is None:
                 continue
             pred, src = converted
@@ -653,7 +737,7 @@ def _annotated_conditions_for_callable(
             def _eval_param(
                 bindings: Mapping[str, object], *, _p=pred, _n=param_name
             ) -> bool:
-                return bool(_p(bindings[_n]))
+                return bool(_p(bindings, bindings[_n]))
 
             pre.append(
                 ConditionExpr(
@@ -671,13 +755,13 @@ def _annotated_conditions_for_callable(
         _base, meta = _unwrap_annotated_type(ret_ann)
         if meta:
             for item in _flatten_annotated_metadata(meta):
-                converted = _metadata_to_value_predicate(item)
+                converted = _metadata_to_value_predicate(item, "__return__")
                 if converted is None:
                     continue
                 pred, src = converted
 
                 def _eval_return(bindings: Mapping[str, object], *, _p=pred) -> bool:
-                    return bool(_p(bindings["__return__"]))
+                    return bool(_p(bindings, bindings["__return__"]))
 
                 post.append(
                     ConditionExpr(
@@ -714,14 +798,14 @@ def _annotated_invariants_for_class(cls: type) -> List[ConditionExpr]:
         if not meta:
             continue
         for item in _flatten_annotated_metadata(tuple(meta)):
-            converted = _metadata_to_value_predicate(item)
+            converted = _metadata_to_value_predicate(item, attr)
             if converted is None:
                 continue
             pred, src = converted
 
             def _eval(bindings: Mapping[str, object], *, _p=pred, _a=attr) -> bool:
                 self_obj = bindings["self"]
-                return bool(_p(getattr(self_obj, _a)))
+                return bool(_p(bindings, getattr(self_obj, _a)))
 
             inv.append(
                 ConditionExpr(

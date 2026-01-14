@@ -1,7 +1,7 @@
 import inspect
 import json
 import sys
-from typing import List, Optional
+from typing import List, Optional, cast
 
 try:
     from typing import Annotated, Unpack
@@ -501,7 +501,7 @@ def test_annotated_metadata_with_is_valid():
     composite.parsers.append(Pep316Parser(composite))
     conditions = composite.get_fn_conditions(FunctionInfo.from_fn(takes_even))
     assert conditions is not None
-    assert len(conditions.pre) == 2
+    assert len(conditions.pre) == 3
     assert all(cond.evaluate({"x": 4}) for cond in conditions.pre)
     assert any(not cond.evaluate({"x": -2}) for cond in conditions.pre)
     assert any(not cond.evaluate({"x": 3}) for cond in conditions.pre)
@@ -602,7 +602,7 @@ def test_annotated_types_predicate_metadata():
     composite.parsers.append(Pep316Parser(composite))
     conditions = composite.get_fn_conditions(FunctionInfo.from_fn(constrained))
     assert conditions is not None
-    assert len(conditions.pre) == 4
+    assert len(conditions.pre) == 5
     assert all(cond.evaluate({"x": 3}) for cond in conditions.pre)
     assert any(not cond.evaluate({"x": -2}) for cond in conditions.pre)
     assert any(not cond.evaluate({"x": 1}) for cond in conditions.pre)
@@ -735,6 +735,224 @@ def test_beartype_decorator_preserves_annotations():
     assert len(conditions.pre) == 1
     assert all(cond.evaluate({"x": 5}) for cond in conditions.pre)
     assert any(not cond.evaluate({"x": 0}) for cond in conditions.pre)
+
+
+@pytest.mark.skipif(annotated_types is None, reason="annotated-types is not installed")
+def test_annotated_nested_metadata_flattening():
+    def gt(value: int) -> bool:
+        return value > 0
+
+    def bounded(
+        x: Annotated[
+            Annotated[int, annotated_types.Ge(2), annotated_types.MultipleOf(2)],
+            annotated_types.Le(10),
+        ],
+    ) -> int:
+        return x
+
+    composite = CompositeConditionParser()
+    composite.parsers.append(Pep316Parser(composite))
+    conditions = composite.get_fn_conditions(FunctionInfo.from_fn(bounded))
+    assert conditions is not None
+    assert len(conditions.pre) == 3
+    assert all(cond.evaluate({"x": 4}) for cond in conditions.pre)
+    assert any(not cond.evaluate({"x": 1}) for cond in conditions.pre)
+    assert any(not cond.evaluate({"x": 11}) for cond in conditions.pre)
+
+
+@pytest.mark.skipif(annotated_types is None, reason="annotated-types is not installed")
+def test_annotated_types_unpacked_tuple_bounds():
+    def constrained(
+        x: Annotated[
+            int,
+            Unpack[
+                tuple[
+                    annotated_types.Ge(0),
+                    annotated_types.Le(5),
+                    annotated_types.MultipleOf(5),
+                ]
+            ],
+        ],
+    ) -> int:
+        return x
+
+    composite = CompositeConditionParser()
+    composite.parsers.append(Pep316Parser(composite))
+    conditions = composite.get_fn_conditions(FunctionInfo.from_fn(constrained))
+    assert conditions is not None
+    assert len(conditions.pre) == 3
+    assert all(cond.evaluate({"x": 5}) for cond in conditions.pre)
+    assert any(not cond.evaluate({"x": -1}) for cond in conditions.pre)
+    assert any(not cond.evaluate({"x": 6}) for cond in conditions.pre)
+
+
+@pytest.mark.skipif(annotated_types is None, reason="annotated-types is not installed")
+def test_annotated_types_regex_and_length():
+    import re
+
+    def constrained(
+        x: Annotated[
+            str,
+            annotated_types.Predicate(
+                lambda value: bool(re.fullmatch(r"[a-z]{3}", value))
+            ),
+            annotated_types.Len(min_length=3, max_length=3),
+        ],
+    ) -> str:
+        return x
+
+    composite = CompositeConditionParser()
+    composite.parsers.append(Pep316Parser(composite))
+    conditions = composite.get_fn_conditions(FunctionInfo.from_fn(constrained))
+    assert conditions is not None
+    assert len(conditions.pre) == 3
+    assert all(cond.evaluate({"x": "abc"}) for cond in conditions.pre)
+    assert any(not cond.evaluate({"x": "abcd"}) for cond in conditions.pre)
+    assert any(not cond.evaluate({"x": "ab1"}) for cond in conditions.pre)
+
+
+@pytest.mark.skipif(annotated_types is None, reason="annotated-types is not installed")
+def test_class_invariants_with_grouped_metadata():
+    class Resource:
+        quota: Annotated[int, annotated_types.Ge(5), annotated_types.Le(10)]
+        tag: Annotated[str, annotated_types.Predicate(str.isalpha)]
+
+        def __init__(self, quota: int, tag: str) -> None:
+            self.quota = quota
+            self.tag = tag
+
+    conditions = Pep316Parser().get_class_conditions(Resource)
+    assert len(conditions.inv) == 3
+    assert all(cond.evaluate({"self": Resource(6, "ok")}) for cond in conditions.inv)
+    assert any(
+        not cond.evaluate({"self": Resource(4, "ok")}) for cond in conditions.inv
+    )
+    assert any(
+        not cond.evaluate({"self": Resource(6, "123")}) for cond in conditions.inv
+    )
+
+
+@pytest.mark.skipif(annotated_types is None, reason="annotated-types is not installed")
+def test_string_annotation_metrics():
+    def is_positive(v: int) -> bool:
+        return v > 0
+
+    globals()["is_positive"] = is_positive
+
+    def annotated(
+        x: "Annotated[int, is_positive, annotated_types.Le(4)]",
+    ) -> int:
+        return x
+
+    composite = CompositeConditionParser()
+    composite.parsers.append(Pep316Parser(composite))
+    conditions = composite.get_fn_conditions(FunctionInfo.from_fn(annotated))
+    assert conditions is not None
+    assert len(conditions.pre) == 2
+    assert all(cond.evaluate({"x": 3}) for cond in conditions.pre)
+    assert any(not cond.evaluate({"x": -1}) for cond in conditions.pre)
+
+
+def test_beartype_vale_isattr_validator():
+    from beartype.vale import Is, IsAttr, IsInstance
+
+    class Container:
+        foo = "hello"
+
+    def constrained(
+        x: Annotated[Container, IsAttr["foo", IsInstance[str]]],
+    ) -> Container:
+        return x
+
+    composite = CompositeConditionParser()
+    composite.parsers.append(Pep316Parser(composite))
+    conditions = composite.get_fn_conditions(FunctionInfo.from_fn(constrained))
+    assert conditions is not None
+    assert len(conditions.pre) == 1
+    assert all(cond.evaluate({"x": Container()}) for cond in conditions.pre)
+    diff_obj = type("Diff", (), {})()
+    assert any(not cond.evaluate({"x": diff_obj}) for cond in conditions.pre)
+
+
+def test_beartype_vale_conjunction_validator():
+    from beartype.vale import Is
+
+    def is_positive(v: int) -> bool:
+        return v > 0
+
+    def is_even(v: int) -> bool:
+        return v % 2 == 0
+
+    validator = Is[is_positive] & Is[is_even]
+
+    def constrained(x: Annotated[int, validator]) -> int:
+        return x
+
+    composite = CompositeConditionParser()
+    composite.parsers.append(Pep316Parser(composite))
+    conditions = composite.get_fn_conditions(FunctionInfo.from_fn(constrained))
+    assert conditions is not None
+    assert len(conditions.pre) == 1
+    assert all(cond.evaluate({"x": 2}) for cond in conditions.pre)
+    assert any(not cond.evaluate({"x": 0}) for cond in conditions.pre)
+
+
+def test_beartype_vale_isinstance_and_return():
+    from beartype.vale import IsInstance
+
+    def constrained(
+        x: Annotated[object, IsInstance[int]],
+    ) -> Annotated[int, IsInstance[int]]:
+        return cast(int, x)
+
+    composite = CompositeConditionParser()
+    composite.parsers.append(Pep316Parser(composite))
+    conditions = composite.get_fn_conditions(FunctionInfo.from_fn(constrained))
+    assert conditions is not None
+    assert len(conditions.pre) == 1
+    assert all(cond.evaluate({"x": 1}) for cond in conditions.pre)
+    assert any(not cond.evaluate({"x": "no"}) for cond in conditions.pre)
+    assert len(conditions.post) == 1
+    assert conditions.post[0].evaluate({"__return__": 1}) is True
+    assert conditions.post[0].evaluate({"__return__": "no"}) is False
+
+
+def test_beartype_vale_issubclass_validator():
+    from beartype.vale import IsSubclass
+
+    def constrained(x: Annotated[type, IsSubclass[dict]]) -> type:
+        return x
+
+    composite = CompositeConditionParser()
+    composite.parsers.append(Pep316Parser(composite))
+    conditions = composite.get_fn_conditions(FunctionInfo.from_fn(constrained))
+    assert conditions is not None
+    assert len(conditions.pre) == 1
+    assert all(cond.evaluate({"x": dict}) for cond in conditions.pre)
+    assert any(not cond.evaluate({"x": list}) for cond in conditions.pre)
+
+
+def test_beartype_vale_with_annotated_types_combo():
+    from beartype.vale import Is
+
+    def constrained(
+        x: Annotated[
+            int,
+            Is[lambda v: v % 2 == 0],
+            annotated_types.Ge(4),
+            annotated_types.Le(10),
+        ],
+    ) -> int:
+        return x
+
+    composite = CompositeConditionParser()
+    composite.parsers.append(Pep316Parser(composite))
+    conditions = composite.get_fn_conditions(FunctionInfo.from_fn(constrained))
+    assert conditions is not None
+    assert len(conditions.pre) == 3
+    assert all(cond.evaluate({"x": 6}) for cond in conditions.pre)
+    assert any(not cond.evaluate({"x": 5}) for cond in conditions.pre)
+    assert any(not cond.evaluate({"x": 11}) for cond in conditions.pre)
 
 
 def no_postconditions(items: List[float]) -> float:
